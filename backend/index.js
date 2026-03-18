@@ -6,17 +6,28 @@ const { parse } = require('csv-parse/sync');
 const axios = require('axios');
 const ExcelJS = require('exceljs');
 const crypto = require('crypto');
+const Groq = require('groq-sdk');
 require('dotenv').config();
 
 const app = express();
 const port = process.env.PORT || 2999;
 const vtApiKey = process.env.VIRUSTOTAL_API_KEY;
+const groqApiKey = process.env.GROQ_API_KEY;
 
-// Fail fast if API key is missing
+// Fail fast if VT API key is missing
 if (!vtApiKey || vtApiKey.trim() === "") {
     console.error('❌ CRITICAL ERROR: VIRUSTOTAL_API_KEY is not set in .env file.');
     console.error('The server cannot function without a valid VirusTotal API key.');
     process.exit(1);
+}
+
+// Groq LLM setup (optional — degrades gracefully if missing)
+let groqClient = null;
+if (groqApiKey && groqApiKey.trim() !== '') {
+    groqClient = new Groq({ apiKey: groqApiKey });
+    console.log('🤖 Groq LLM enabled — AI recommendations will be generated for flagged files.');
+} else {
+    console.warn('⚠️ GROQ_API_KEY not set. AI recommendations will be skipped.');
 }
 
 app.use(cors({
@@ -111,6 +122,42 @@ const getVTAnalysis = (hash) => {
     });
 };
 
+// LLM-powered remediation recommendation (Groq / Llama 3)
+const getLLMRecommendation = async (fileInfo) => {
+    if (!groqClient) return 'AI recommendations unavailable (API key not configured).';
+
+    const prompt = `You are a cybersecurity analyst. Given the following VirusTotal detection result, provide a concise remediation recommendation in under 100 words.
+
+File: ${fileInfo.filename}
+Path: ${fileInfo.filePath}
+Category: ${fileInfo.category}
+Malicious Detections: ${fileInfo.malicious}
+Suspicious Detections: ${fileInfo.suspicious}
+Top Detection Names: ${fileInfo.detections}
+
+Rules:
+- Use cautious language ("may indicate", "suggests", not "this IS malware")
+- Provide 1-2 specific actionable steps
+- Mention if the filename mimics a known legitimate program
+- Do NOT present uncertain analysis as confirmed fact
+- Keep the tone professional and helpful`;
+
+    try {
+        const response = await groqClient.chat.completions.create({
+            messages: [{ role: 'user', content: prompt }],
+            model: 'llama-3.1-8b-instant',
+            temperature: 0.3,
+            max_tokens: 200
+        });
+        const recommendation = response.choices[0]?.message?.content?.trim();
+        console.log(`🤖 AI recommendation generated for ${fileInfo.filename}`);
+        return recommendation || 'No recommendation generated.';
+    } catch (error) {
+        console.error(`⚠️ LLM error for ${fileInfo.filename}:`, error.message);
+        return 'AI recommendation could not be generated for this entry.';
+    }
+};
+
 // Background task to process files with Duplicate Hash Deduplication
 const runAnalysis = async (jobId, files) => {
     const job = activeJobs.get(jobId);
@@ -144,7 +191,6 @@ const runAnalysis = async (jobId, files) => {
         // Step 3: Analyze each UNIQUE hash
         const resultsMap = new Map();
         for (const hash of uniqueHashes) {
-            // Find the first record with this hash for name display
             const representativeRecord = allRecords.find(r => r.Hash === hash);
             job.currentFile = representativeRecord ? representativeRecord.Name : 'System File';
             
@@ -154,9 +200,34 @@ const runAnalysis = async (jobId, files) => {
             job.processed++;
 
             if (analysis.flaggedCount > 0) {
-                job.flaggedCount++; // This tracks unique flagged files
+                job.flaggedCount++;
                 console.log(`🚩 FLAGGED: ${job.currentFile} (${analysis.flaggedCount} matches)`);
             }
+        }
+
+        // Step 3.5: Generate AI recommendations for FLAGGED unique hashes
+        const aiRecommendations = new Map();
+        const flaggedHashes = Array.from(resultsMap.entries()).filter(([, a]) => a.flaggedCount > 0);
+
+        if (flaggedHashes.length > 0 && groqClient) {
+            console.log(`🤖 Generating AI recommendations for ${flaggedHashes.length} flagged file(s)...`);
+            job.currentFile = 'Generating AI insights...';
+
+            for (const [hash, analysis] of flaggedHashes) {
+                const record = allRecords.find(r => r.Hash === hash);
+                const recommendation = await getLLMRecommendation({
+                    filename: record?.Name || 'Unknown',
+                    filePath: record?.Path || 'Unknown',
+                    category: record?.Category || 'Unknown',
+                    malicious: analysis.malicious,
+                    suspicious: analysis.suspicious,
+                    detections: analysis.detections
+                });
+                aiRecommendations.set(hash, recommendation);
+            }
+            console.log(`✅ AI recommendations complete for ${aiRecommendations.size} entries.`);
+        } else if (flaggedHashes.length > 0) {
+            console.log('⏭️ Skipping AI recommendations (Groq API key not configured).');
         }
 
         // Step 4: Map results back to ORIGINAL records for the final report
@@ -176,6 +247,7 @@ const runAnalysis = async (jobId, files) => {
                     suspicious: analysis.suspicious,
                     vtLink: { text: 'View on VirusTotal', hyperlink: `https://www.virustotal.com/gui/file/${hash}` },
                     detections: analysis.detections,
+                    aiRecommendation: aiRecommendations.get(hash) || 'N/A',
                     filePath: record.Path
                 });
             }
@@ -187,11 +259,11 @@ const runAnalysis = async (jobId, files) => {
         const worksheet = workbook.addWorksheet('Security Analysis');
 
         // 1. Summary Header
-        worksheet.mergeCells('A1:H1');
+        worksheet.mergeCells('A1:I1');
         const titleCell = worksheet.getCell('A1');
         titleCell.value = 'HOST INVENTORY SECURITY ANALYSIS SUMMARY';
         titleCell.font = { bold: true, size: 14, color: { argb: 'FFFFFFFF' } };
-        titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } }; // Slate 800
+        titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } };
         titleCell.alignment = { horizontal: 'center' };
 
         worksheet.getRow(2).values = ['Total Unique Hashes', 'Total Unique Flagged', 'Malicious Found', 'Suspicious Found'];
@@ -201,8 +273,14 @@ const runAnalysis = async (jobId, files) => {
         const totalSuspicious = Array.from(resultsMap.values()).reduce((sum, r) => sum + r.suspicious, 0);
         worksheet.getRow(3).values = [job.total, job.flaggedCount, totalMalicious, totalSuspicious];
 
+        // AI Disclaimer row
+        worksheet.mergeCells('A4:I4');
+        const disclaimerCell = worksheet.getCell('A4');
+        disclaimerCell.value = '⚠️ AI recommendations are guidance only — not a substitute for professional malware analysis.';
+        disclaimerCell.font = { italic: true, size: 9, color: { argb: 'FF94A3B8' } };
+
         // 2. Data Table
-        const headerRowIndex = 5;
+        const headerRowIndex = 6;
         worksheet.columns = [
             { header: 'Category', key: 'category', width: 15 },
             { header: 'Filename', key: 'filename', width: 25 },
@@ -211,6 +289,7 @@ const runAnalysis = async (jobId, files) => {
             { header: 'Suspicious', key: 'suspicious', width: 12 },
             { header: 'VirusTotal Link', key: 'vtLink', width: 20 },
             { header: 'Top Detections', key: 'detections', width: 40 },
+            { header: 'AI Recommendation', key: 'aiRecommendation', width: 60 },
             { header: 'File Path', key: 'filePath', width: 50 }
         ];
 
@@ -218,15 +297,18 @@ const runAnalysis = async (jobId, files) => {
         const headerRow = worksheet.getRow(headerRowIndex);
         headerRow.values = worksheet.columns.map(c => c.header);
         headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-        headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF334155' } }; // Slate 700
+        headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF334155' } };
 
         // Add Data
         finalResultsForExcel.forEach((r) => {
             const row = worksheet.addRow(r);
             row.getCell(6).font = { color: { argb: 'FF3B82F6' }, underline: true };
+            // AI Recommendation styling — word wrap + italic
+            row.getCell(8).alignment = { wrapText: true, vertical: 'top' };
+            row.getCell(8).font = { italic: true, size: 10, color: { argb: 'FF64748B' } };
         });
 
-        // 3. Conditional Formatting
+        // 3. Conditional Formatting (Flagged Count = Column C)
         if (finalResultsForExcel.length > 0) {
             worksheet.addConditionalFormatting({
                 ref: `C${headerRowIndex + 1}:C${headerRowIndex + finalResultsForExcel.length}`,
@@ -249,7 +331,7 @@ const runAnalysis = async (jobId, files) => {
 
         job.reportBuffer = await workbook.xlsx.writeBuffer();
         job.status = 'complete';
-        console.log(`✨ Job ${jobId} finalized. Deduplication saved ${allRecords.length - job.total} requests!`);
+        console.log(`✨ Job ${jobId} finalized. Deduplication saved ${allRecords.length - job.total} API calls!`);
     } catch (error) {
         console.error(`❌ Job ${jobId} failed:`, error);
         job.status = 'error';
