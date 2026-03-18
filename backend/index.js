@@ -30,8 +30,24 @@ if (groqApiKey && groqApiKey.trim() !== '') {
     console.warn('⚠️ GROQ_API_KEY not set. AI recommendations will be skipped.');
 }
 
+// CORS configuration for production deployment
+const allowedOrigins = [
+    process.env.FRONTEND_URL,
+    'http://localhost:3000',
+    'http://localhost:3001'
+].filter(Boolean);
+
 app.use(cors({
-    origin: 'http://localhost:3000',
+    origin: (origin, callback) => {
+        // Allow requests with no origin (like mobile apps or curl) 
+        // or if the origin is in our allowed list
+        if (!origin || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            console.warn(`🔒 CORS blocked request from origin: ${origin}`);
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
     methods: ['GET', 'POST'],
     allowedHeaders: ['Content-Type']
 }));
