@@ -111,50 +111,77 @@ const getVTAnalysis = (hash) => {
     });
 };
 
-// Background task to process files
+// Background task to process files with Duplicate Hash Deduplication
 const runAnalysis = async (jobId, files) => {
     const job = activeJobs.get(jobId);
     if (!job) return;
-    const allResults = [];
+    
     console.log(`🏗️ Starting background analysis for Job ${jobId}...`);
 
     try {
+        // Step 1: Parse all files and gather all records
+        const allRecords = [];
         for (const file of files) {
-            console.log(`📄 Parsing file: ${file.originalname}`);
+            console.log(`📄 Reading file: ${file.originalname}`);
             const content = file.buffer.toString();
             const records = parse(content, { columns: true, skip_empty_lines: true });
+            allRecords.push(...records);
+        }
 
-            for (const record of records) {
-                const hash = record.Hash;
-                const path = record.Path;
-                const name = record.Name;
-                const category = record.Category || 'Unknown';
+        // Step 2: Identify unique valid SHA-256 hashes
+        const uniqueHashes = new Set();
+        allRecords.forEach(record => {
+            const hash = record.Hash;
+            if (hash && hash.length === 64 && /^[a-fA-F0-9]+$/.test(hash)) {
+                uniqueHashes.add(hash);
+            }
+        });
 
-                if (hash && hash.length === 64 && /^[a-fA-F0-9]+$/.test(hash)) {
-                    job.currentFile = name;
-                    console.log(`🔬 Analyzing ${name} (${hash.substring(0, 8)}...)`);
-                    const analysis = await getVTAnalysis(hash);
-                    job.processed++;
-                    
-                    if (analysis.flaggedCount > 0) {
-                        job.flaggedCount++;
-                        console.log(`🚩 FLAGGED: ${name} (Matches: ${analysis.flaggedCount})`);
-                        allResults.push({
-                            category,
-                            filename: name,
-                            flaggedCount: analysis.flaggedCount,
-                            malicious: analysis.malicious,
-                            suspicious: analysis.suspicious,
-                            vtLink: { text: 'View on VirusTotal', hyperlink: `https://www.virustotal.com/gui/file/${hash}` },
-                            detections: analysis.detections,
-                            filePath: path
-                        });
-                    }
-                }
+        // Update job total to be the number of UNIQUE hashes (this is what we actually check)
+        job.total = uniqueHashes.size;
+        console.log(`🗜️ Deduplication complete: ${allRecords.length} rows reduced to ${uniqueHashes.size} unique hashes.`);
+
+        // Step 3: Analyze each UNIQUE hash
+        const resultsMap = new Map();
+        for (const hash of uniqueHashes) {
+            // Find the first record with this hash for name display
+            const representativeRecord = allRecords.find(r => r.Hash === hash);
+            job.currentFile = representativeRecord ? representativeRecord.Name : 'System File';
+            
+            console.log(`🔬 Analyzing unique hash: ${hash.substring(0, 8)}... (${job.currentFile})`);
+            const analysis = await getVTAnalysis(hash);
+            resultsMap.set(hash, analysis);
+            job.processed++;
+
+            if (analysis.flaggedCount > 0) {
+                job.flaggedCount++; // This tracks unique flagged files
+                console.log(`🚩 FLAGGED: ${job.currentFile} (${analysis.flaggedCount} matches)`);
             }
         }
 
-        console.log(`📊 Generating Excel report for Job ${jobId} with ${allResults.length} detections...`);
+        // Step 4: Map results back to ORIGINAL records for the final report
+        const finalResultsForExcel = [];
+        console.log(`📊 Reconstructing full report from ${allRecords.length} inventory items...`);
+
+        for (const record of allRecords) {
+            const hash = record.Hash;
+            const analysis = resultsMap.get(hash);
+
+            if (analysis && analysis.flaggedCount > 0) {
+                finalResultsForExcel.push({
+                    category: record.Category || 'Unknown',
+                    filename: record.Name,
+                    flaggedCount: analysis.flaggedCount,
+                    malicious: analysis.malicious,
+                    suspicious: analysis.suspicious,
+                    vtLink: { text: 'View on VirusTotal', hyperlink: `https://www.virustotal.com/gui/file/${hash}` },
+                    detections: analysis.detections,
+                    filePath: record.Path
+                });
+            }
+        }
+
+        console.log(`📊 Generating Excel report with ${finalResultsForExcel.length} total flagged entries...`);
         // Generate Enriched Excel
         const workbook = new ExcelJS.Workbook();
         const worksheet = workbook.addWorksheet('Security Analysis');
@@ -167,11 +194,11 @@ const runAnalysis = async (jobId, files) => {
         titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } }; // Slate 800
         titleCell.alignment = { horizontal: 'center' };
 
-        worksheet.getRow(2).values = ['Total Unique Hashes', 'Total Flagged', 'Malicious Found', 'Suspicious Found'];
+        worksheet.getRow(2).values = ['Total Unique Hashes', 'Total Unique Flagged', 'Malicious Found', 'Suspicious Found'];
         worksheet.getRow(2).font = { bold: true };
         
-        const totalMalicious = allResults.reduce((sum, r) => sum + r.malicious, 0);
-        const totalSuspicious = allResults.reduce((sum, r) => sum + r.suspicious, 0);
+        const totalMalicious = Array.from(resultsMap.values()).reduce((sum, r) => sum + r.malicious, 0);
+        const totalSuspicious = Array.from(resultsMap.values()).reduce((sum, r) => sum + r.suspicious, 0);
         worksheet.getRow(3).values = [job.total, job.flaggedCount, totalMalicious, totalSuspicious];
 
         // 2. Data Table
@@ -194,28 +221,27 @@ const runAnalysis = async (jobId, files) => {
         headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF334155' } }; // Slate 700
 
         // Add Data
-        allResults.forEach((r, idx) => {
+        finalResultsForExcel.forEach((r) => {
             const row = worksheet.addRow(r);
-            // Column F is the link
             row.getCell(6).font = { color: { argb: 'FF3B82F6' }, underline: true };
         });
 
-        // 3. Conditional Formatting (Flagged Count is Column C / Index 3)
-        if (allResults.length > 0) {
+        // 3. Conditional Formatting
+        if (finalResultsForExcel.length > 0) {
             worksheet.addConditionalFormatting({
-                ref: `C${headerRowIndex + 1}:C${headerRowIndex + allResults.length}`,
+                ref: `C${headerRowIndex + 1}:C${headerRowIndex + finalResultsForExcel.length}`,
                 rules: [
                     {
                         type: 'cellIs',
                         operator: 'greaterThanOrEqual',
                         formulae: [10],
-                        style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFCA5A5' } }, font: { color: { argb: 'FF991B1B' } } } // Red
+                        style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFCA5A5' } }, font: { color: { argb: 'FF991B1B' } } }
                     },
                     {
                         type: 'cellIs',
                         operator: 'between',
                         formulae: [1, 9],
-                        style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFED7AA' } }, font: { color: { argb: 'FF9A3412' } } } // Orange
+                        style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFED7AA' } }, font: { color: { argb: 'FF9A3412' } } }
                     }
                 ]
             });
@@ -223,7 +249,7 @@ const runAnalysis = async (jobId, files) => {
 
         job.reportBuffer = await workbook.xlsx.writeBuffer();
         job.status = 'complete';
-        console.log(`✨ Job ${jobId} finalized. Report ready.`);
+        console.log(`✨ Job ${jobId} finalized. Deduplication saved ${allRecords.length - job.total} requests!`);
     } catch (error) {
         console.error(`❌ Job ${jobId} failed:`, error);
         job.status = 'error';
