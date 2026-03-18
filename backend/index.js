@@ -12,8 +12,29 @@ const app = express();
 const port = process.env.PORT || 2999;
 const vtApiKey = process.env.VIRUSTOTAL_API_KEY;
 
-app.use(cors());
+// Fail fast if API key is missing
+if (!vtApiKey || vtApiKey.trim() === "") {
+    console.error('❌ CRITICAL ERROR: VIRUSTOTAL_API_KEY is not set in .env file.');
+    console.error('The server cannot function without a valid VirusTotal API key.');
+    process.exit(1);
+}
+
+app.use(cors({
+    origin: 'http://localhost:3000',
+    methods: ['GET', 'POST'],
+    allowedHeaders: ['Content-Type']
+}));
 app.use(express.json());
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'healthy',
+        uptime: process.uptime(),
+        api_key_configured: !!vtApiKey,
+        active_jobs: activeJobs.size
+    });
+});
 
 // In-memory job store
 const activeJobs = new Map();
