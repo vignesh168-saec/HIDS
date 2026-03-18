@@ -98,8 +98,8 @@ const SECURITY_RULES = [
         id: 'CFG_WORLD_WRITABLE',
         category: 'ConfigFile',
         severity: 'High',
-        regex: /writable|777|666/i,
-        description: 'Potential world-writable file permissions detected in metadata.'
+        regex: /(?<!not\s)writable|777|666/i,
+        description: 'Potential world-writable file permissions detected in metadata (ignoring "not writable" comments).'
     },
     {
         id: 'CFG_HIDDEN_IN_OPT',
@@ -264,7 +264,23 @@ const runAnalysis = async (jobId, files) => {
         for (const file of files) {
             console.log(`📄 Reading file: ${file.originalname}`);
             const content = file.buffer.toString();
-            const records = parse(content, { columns: true, skip_empty_lines: true });
+            
+            // Detect delimiter (comma or tab)
+            const firstLine = content.split('\n')[0];
+            const delimiter = firstLine.includes('\t') ? '\t' : ',';
+            console.log(`📡 Auto-detected delimiter: ${delimiter === '\t' ? 'TAB' : 'COMMA'}`);
+
+            const records = parse(content, { 
+                columns: true, 
+                skip_empty_lines: true,
+                delimiter: delimiter,
+                trim: true
+            });
+
+            console.log(`📝 Parsed ${records.length} records from ${file.originalname}`);
+            if (records.length > 0) {
+                console.log(`🔍 Example Category: "${records[0].Category}"`);
+            }
             allRecords.push(...records);
         }
 
@@ -410,11 +426,11 @@ const runAnalysis = async (jobId, files) => {
         vtTitle.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } };
         vtTitle.alignment = { horizontal: 'center' };
 
-        vtSheet.getRow(2).values = ['Total Unique Hashes', 'Total Unique Flagged', 'Malicious Found', 'Suspicious Found'];
+        vtSheet.getRow(2).values = ['Total Unique Hashes', 'Total Unique Flagged', 'Malicious Found', 'Suspicious Found', 'Rules Flagged (Sheet 2)'];
         vtSheet.getRow(2).font = { bold: true };
         const totalMalicious = Array.from(resultsMap.values()).reduce((sum, r) => sum + r.malicious, 0);
         const totalSuspicious = Array.from(resultsMap.values()).reduce((sum, r) => sum + r.suspicious, 0);
-        vtSheet.getRow(3).values = [uniqueHashes.size, flaggedVTHashes.length, totalMalicious, totalSuspicious];
+        vtSheet.getRow(3).values = [uniqueHashes.size, flaggedVTHashes.length, totalMalicious, totalSuspicious, finalRuleResults.length];
 
         vtSheet.mergeCells('A4:I4');
         const vtDisclaimer = vtSheet.getCell('A4');
