@@ -198,7 +198,7 @@ export default function OSSwitcher() {
                                 </div>
                                 <div className="flex gap-4 items-start">
                                     <span className="flex-shrink-0 w-6 h-6 rounded-full bg-blue-500/20 text-blue-400 flex items-center justify-center text-xs font-bold">4</span>
-                                    <p className="text-sm text-neutral-300">Check generated CSV files in the current directory.</p>
+                                    <p className="text-sm text-neutral-300">Check generated <b>System_Inventory.csv</b> file in the current directory.</p>
                                 </div>
                             </div>
                         </div>

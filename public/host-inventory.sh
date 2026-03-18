@@ -1,34 +1,48 @@
 #!/usr/bin/env bash
 
 # Host Inventory Collector for Linux
-# Integrates process, service, configuration, cron, and download scans.
+# Integrates process, service, configuration, cron, and download scans into a unified CSV.
 
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-BASE_OUTPUT="linux_inventory_$TIMESTAMP"
+OUTPUT_CSV="System_Inventory.csv"
 
 echo "Starting Linux Host Inventory Collection..."
+
+# Initialize CSV with unified headers
+echo "Category,Name,Path,Additional,Status,Hash" > "$OUTPUT_CSV"
+
+# Helper to append to CSV with proper quoting
+append_to_csv() {
+    local category=$1
+    local name=$2
+    local path=$3
+    local additional=$4
+    local status=$5
+    local hash=$6
+    echo "\"$category\",\"$name\",\"$path\",\"$additional\",\"$status\",\"$hash\"" >> "$OUTPUT_CSV"
+}
 
 ################################################################################
 # 1. Process Inventory
 ################################################################################
 echo "[1/5] Collecting Process Inventory..."
-PROCESS_OUTPUT="process_inventory.csv"
-echo "PID,Name,Category,Type,Executable,Script,Hash" > "$PROCESS_OUTPUT"
 
 for pid_dir in /proc/[0-9]*; do
     pid=$(basename "$pid_dir")
+    [[ ! -d "$pid_dir" ]] && continue
     name=$(cat /proc/$pid/comm 2>/dev/null)
-    cmdline=$(tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null)
+    cmdline=$(tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null | sed 's/"/""/g')
     exe=$(readlink -f /proc/$pid/exe 2>/dev/null)
     user=$(stat -c '%U' /proc/$pid 2>/dev/null)
 
-    category="User Process"
-    [[ "$user" == "root" ]] && category="System Service"
-    grep -qaE 'docker|kubepods|containerd' /proc/$pid/cgroup 2>/dev/null && category="Container Process"
+    # Classification
+    proc_category="User Process"
+    [[ "$user" == "root" ]] && proc_category="System Service"
+    grep -qaE 'docker|kubepods|containerd' /proc/$pid/cgroup 2>/dev/null && proc_category="Container Process"
 
     type="Executable"
     script="-"
     hash="N/A"
+    status="OK"
 
     if [[ ! -e /proc/$pid/exe ]]; then
         type="Kernel Thread"
@@ -51,15 +65,13 @@ for pid_dir in /proc/[0-9]*; do
         fi
     done
 
-    echo "\"$pid\",\"$name\",\"$category\",\"$type\",\"$exe\",\"$script\",\"$hash\"" >> "$PROCESS_OUTPUT"
+    append_to_csv "Process" "$name" "$exe" "PID:$pid; Cat:$proc_category; Type:$type; Script:$script" "$status" "$hash"
 done
 
 ################################################################################
 # 2. Service Inventory
 ################################################################################
 echo "[2/5] Collecting Service Inventory..."
-SERVICE_OUTPUT="linux_service_hashes.csv"
-echo "ServiceName,State,ExecPath,Hash" > "$SERVICE_OUTPUT"
 
 services=$(systemctl list-unit-files --type=service --no-legend | awk '{print $1}')
 for service in $services; do
@@ -70,20 +82,21 @@ for service in $services; do
     if [[ -z "$exec_path" ]]; then
         exec_path="Not Found"
         hash="N/A"
+        status="Missing"
     elif [[ -f "$exec_path" ]]; then
         hash=$(sha256sum "$exec_path" 2>/dev/null | awk '{print $1}')
+        status="OK"
     else
         hash="File Missing"
+        status="Error"
     fi
-    echo "\"$service\",\"$state\",\"$exec_path\",\"$hash\"" >> "$SERVICE_OUTPUT"
+    append_to_csv "Service" "$service" "$exec_path" "State:$state" "$status" "$hash"
 done
 
 ################################################################################
 # 3. Configuration File Inventory
 ################################################################################
 echo "[3/5] Collecting Configuration File Inventory..."
-CONFIG_OUTPUT="linux_config_file_inventory.csv"
-echo "FileName,FullPath,FileType,SHA256" > "$CONFIG_OUTPUT"
 
 directories=("/etc" "/etc/nginx" "/etc/apache2" "/etc/systemd" "/opt")
 extensions=("*.conf" "*.cfg" "*.cnf" "*.yaml" "*.yml" "*.json" "*.xml" "*.ini")
@@ -91,11 +104,11 @@ extensions=("*.conf" "*.cfg" "*.cnf" "*.yaml" "*.yml" "*.json" "*.xml" "*.ini")
 for dir in "${directories[@]}"; do
     if [[ -d "$dir" ]]; then
         for ext in "${extensions[@]}"; do
-            find "$dir" -type f -name "$ext" 2>/dev/null | while read -r file; do
+            find "$dir" -maxdepth 3 -type f -name "$ext" 2>/dev/null | while read -r file; do
                 filename=$(basename "$file")
-                filetype=$(file -b "$file")
+                filetype=$(file -b "$file" | sed 's/"/""/g')
                 hash=$(sha256sum "$file" 2>/dev/null | awk '{print $1}')
-                echo "\"$filename\",\"$file\",\"$filetype\",\"$hash\"" >> "$CONFIG_OUTPUT"
+                append_to_csv "ConfigFile" "$filename" "$file" "Type:$filetype" "Found" "$hash"
             done
         done
     fi
@@ -105,19 +118,19 @@ done
 # 4. Cron Job Inventory
 ################################################################################
 echo "[4/5] Collecting Cron Job Inventory..."
-CRON_OUTPUT="linux_cron_inventory.csv"
-echo "CronSource,CommandPath,FileType,SHA256" > "$CRON_OUTPUT"
 
 if [[ -f /etc/crontab ]]; then
     grep -v '^#' /etc/crontab | awk '{print $7}' | while read -r cmd; do
         if [[ -f "$cmd" ]]; then
-            filetype=$(file -b "$cmd")
+            filetype=$(file -b "$cmd" | sed 's/"/""/g')
             hash=$(sha256sum "$cmd" 2>/dev/null | awk '{print $1}')
+            status="OK"
         else
             filetype="Command/Script"
             hash="N/A"
+            status="Found"
         fi
-        echo "\"/etc/crontab\",\"$cmd\",\"$filetype\",\"$hash\"" >> "$CRON_OUTPUT"
+        append_to_csv "CronJob" "$(basename "$cmd")" "$cmd" "Source:/etc/crontab; Type:$filetype" "$status" "$hash"
     done
 fi
 
@@ -125,9 +138,9 @@ cron_dirs=("/etc/cron.d" "/etc/cron.daily" "/etc/cron.hourly" "/etc/cron.weekly"
 for dir in "${cron_dirs[@]}"; do
     if [[ -d "$dir" ]]; then
         find "$dir" -type f 2>/dev/null | while read -r file; do
-            filetype=$(file -b "$file")
+            filetype=$(file -b "$file" | sed 's/"/""/g')
             hash=$(sha256sum "$file" 2>/dev/null | awk '{print $1}')
-            echo "\"$dir\",\"$file\",\"$filetype\",\"$hash\"" >> "$CRON_OUTPUT"
+            append_to_csv "CronJob" "$(basename "$file")" "$file" "Source:$dir; Type:$filetype" "OK" "$hash"
         done
     fi
 done
@@ -136,13 +149,15 @@ for user in $(cut -f1 -d: /etc/passwd); do
     crontab -u "$user" -l 2>/dev/null | grep -v '^#' | awk '{print $6}' | while read -r cmd; do
         [[ -z "$cmd" ]] && continue
         if [[ -f "$cmd" ]]; then
-            filetype=$(file -b "$cmd")
+            filetype=$(file -b "$cmd" | sed 's/"/""/g')
             hash=$(sha256sum "$cmd" 2>/dev/null | awk '{print $1}')
+            status="OK"
         else
             filetype="Command"
             hash="N/A"
+            status="Found"
         fi
-        echo "\"User:$user\",\"$cmd\",\"$filetype\",\"$hash\"" >> "$CRON_OUTPUT"
+        append_to_csv "CronJob" "$(basename "$cmd")" "$cmd" "User:$user; Type:$filetype" "$status" "$hash"
     done
 done
 
@@ -150,22 +165,15 @@ done
 # 5. Download Artifact Inventory
 ################################################################################
 echo "[5/5] Collecting Download Artifact Inventory..."
-DOWNLOAD_OUTPUT="linux_download_hashes.csv"
 DOWNLOAD_DIR="$HOME/Downloads"
-echo "FileName,FullPath,FileType,SHA256" > "$DOWNLOAD_OUTPUT"
 
 if [[ -d "$DOWNLOAD_DIR" ]]; then
-    find "$DOWNLOAD_DIR" -type f 2>/dev/null | while read -r file; do
+    find "$DOWNLOAD_DIR" -maxdepth 2 -type f 2>/dev/null | while read -r file; do
         filename=$(basename "$file")
-        filetype=$(file -b "$file")
+        filetype=$(file -b "$file" | sed 's/"/""/g')
         hash=$(sha256sum "$file" 2>/dev/null | awk '{print $1}')
-        echo "\"$filename\",\"$file\",\"$filetype\",\"$hash\"" >> "$DOWNLOAD_OUTPUT"
+        append_to_csv "DownloadsFile" "$filename" "$file" "Type:$filetype" "OK" "$hash"
     done
 fi
 
-echo "Inventory complete. Files generated:"
-echo "- $PROCESS_OUTPUT"
-echo "- $SERVICE_OUTPUT"
-echo "- $CONFIG_OUTPUT"
-echo "- $CRON_OUTPUT"
-echo "- $DOWNLOAD_OUTPUT"
+echo "Inventory complete. Unified file generated: $OUTPUT_CSV"

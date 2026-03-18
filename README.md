@@ -20,10 +20,10 @@ npm run start
 
 ## What users see
 
-- A clear download button for `host-inventory.ps1`
-- Step-by-step instructions to unblock, adjust execution policy, and run the script
-- Notes on where the CSV is written: `C:\\System_Inventory.csv`
-- High-level description of what is collected (config files, processes with hashes, services with hashes incl. svchost DLLs, Downloads `.exe` hashes)
+- A clear download button for `host-inventory.ps1` (Windows) and `host-inventory.sh` (Linux)
+- Step-by-step instructions to unblock/adjust policy and run the script
+- Notes on where the CSV is written: `C:\\System_Inventory.csv` (Windows) or `./System_Inventory.csv` (Linux)
+- High-level description of what is collected (config files, processes with hashes, services with hashes, Downloads file hashes, etc.)
 
 ## Script location
 
