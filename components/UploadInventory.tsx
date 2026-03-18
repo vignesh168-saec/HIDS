@@ -7,23 +7,7 @@ import FilePresentIcon from '@mui/icons-material/FilePresent';
 import SecurityIcon from '@mui/icons-material/Security';
 import TimerIcon from '@mui/icons-material/Timer';
 import BugReportIcon from '@mui/icons-material/BugReport';
-import { ThemeProvider, createTheme, styled } from '@mui/material/styles';
-
-const theme = createTheme({
-    palette: {
-        mode: 'dark',
-        primary: {
-            main: '#60a5fa', // Bright blue
-        },
-        background: {
-            default: 'transparent',
-            paper: 'rgba(24, 24, 27, 0.8)', // Zinc 900 with opacity
-        },
-    },
-    typography: {
-        fontFamily: 'inherit',
-    },
-});
+import { styled } from '@mui/material/styles';
 
 const VisuallyHiddenInput = styled('input')({
     clip: 'rect(0 0 0 0)',
@@ -149,8 +133,7 @@ export default function UploadInventory() {
     const percentComplete = progress ? Math.round((progress.processed / progress.total) * 100) : 0;
 
     return (
-        <ThemeProvider theme={theme}>
-            <Box sx={{ mt: 8 }}>
+        <Box sx={{ mt: 8 }}>
                 <Typography variant="h5" fontWeight={600} gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
                     <SecurityIcon sx={{ color: '#60a5fa' }} />
                     Hash Analysis & Threat Intelligence
@@ -288,6 +271,5 @@ export default function UploadInventory() {
                     </Stack>
                 </Paper>
             </Box>
-        </ThemeProvider>
     );
 }
