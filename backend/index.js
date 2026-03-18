@@ -34,19 +34,34 @@ const processQueue = async () => {
             const response = await axios.get(`https://www.virustotal.com/api/v3/files/${hash}`, {
                 headers: { 'x-apikey': vtApiKey }
             });
-            const stats = response.data.data.attributes.last_analysis_stats;
-            const flaggedCount = stats.malicious + stats.suspicious;
-            resolve(flaggedCount);
+            const attrs = response.data.data.attributes;
+            const stats = attrs.last_analysis_stats;
+            const results = attrs.last_analysis_results || {};
+            
+            // Get top 3 detection names
+            const detections = Object.values(results)
+                .filter(r => r.category === 'malicious' || r.category === 'suspicious')
+                .map(r => r.result)
+                .filter(Boolean)
+                .slice(0, 3);
+
+            resolve({
+                flaggedCount: stats.malicious + stats.suspicious,
+                malicious: stats.malicious,
+                suspicious: stats.suspicious,
+                detections: detections.join(', '),
+                hash: hash
+            });
         } catch (error) {
             if (error.response && error.response.status === 404) {
-                resolve(0);
+                resolve({ flaggedCount: 0, malicious: 0, suspicious: 0, detections: '', hash });
             } else if (error.response && error.response.status === 429) {
                 vtRequestQueue.unshift({ hash, resolve, reject });
                 console.log('Rate limit hit, waiting 60s...');
                 await new Promise(r => setTimeout(r, 60000));
             } else {
                 console.error(`Error checking hash ${hash}:`, error.message);
-                resolve(0);
+                resolve({ flaggedCount: 0, malicious: 0, suspicious: 0, detections: '', hash });
             }
         }
         await new Promise(r => setTimeout(r, 15000)); // 15s delay for free tier
@@ -54,7 +69,7 @@ const processQueue = async () => {
     isProcessingQueue = false;
 };
 
-const getFlaggedCount = (hash) => {
+const getVTAnalysis = (hash) => {
     return new Promise((resolve, reject) => {
         vtRequestQueue.push({ hash, resolve, reject });
         processQueue();
@@ -75,30 +90,95 @@ const runAnalysis = async (jobId, files) => {
                 const hash = record.Hash;
                 const path = record.Path;
                 const name = record.Name;
+                const category = record.Category || 'Unknown';
 
                 if (hash && hash.length === 64 && /^[a-fA-F0-9]+$/.test(hash)) {
                     job.currentFile = name;
-                    const flaggedCount = await getFlaggedCount(hash);
+                    const analysis = await getVTAnalysis(hash);
                     job.processed++;
-                    if (flaggedCount > 0) {
+                    
+                    if (analysis.flaggedCount > 0) {
                         job.flaggedCount++;
-                        allResults.push({ filename: name, flaggedCount, filePath: path });
+                        allResults.push({
+                            category,
+                            filename: name,
+                            flaggedCount: analysis.flaggedCount,
+                            malicious: analysis.malicious,
+                            suspicious: analysis.suspicious,
+                            vtLink: { text: 'View on VirusTotal', hyperlink: `https://www.virustotal.com/gui/file/${hash}` },
+                            detections: analysis.detections,
+                            filePath: path
+                        });
                     }
                 }
             }
         }
 
-        // Generate Excel
+        // Generate Enriched Excel
         const workbook = new ExcelJS.Workbook();
-        const worksheet = workbook.addWorksheet('Flagged Files');
+        const worksheet = workbook.addWorksheet('Security Analysis');
+
+        // 1. Summary Header
+        worksheet.mergeCells('A1:H1');
+        const titleCell = worksheet.getCell('A1');
+        titleCell.value = 'HOST INVENTORY SECURITY ANALYSIS SUMMARY';
+        titleCell.font = { bold: true, size: 14, color: { argb: 'FFFFFFFF' } };
+        titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } }; // Slate 800
+        titleCell.alignment = { horizontal: 'center' };
+
+        worksheet.getRow(2).values = ['Total Unique Hashes', 'Total Flagged', 'Malicious Found', 'Suspicious Found'];
+        worksheet.getRow(2).font = { bold: true };
+        
+        const totalMalicious = allResults.reduce((sum, r) => sum + r.malicious, 0);
+        const totalSuspicious = allResults.reduce((sum, r) => sum + r.suspicious, 0);
+        worksheet.getRow(3).values = [job.total, job.flaggedCount, totalMalicious, totalSuspicious];
+
+        // 2. Data Table
+        const headerRowIndex = 5;
         worksheet.columns = [
-            { header: 'Filename', key: 'filename', width: 30 },
+            { header: 'Category', key: 'category', width: 15 },
+            { header: 'Filename', key: 'filename', width: 25 },
             { header: 'Flagged Count', key: 'flaggedCount', width: 15 },
+            { header: 'Malicious', key: 'malicious', width: 12 },
+            { header: 'Suspicious', key: 'suspicious', width: 12 },
+            { header: 'VirusTotal Link', key: 'vtLink', width: 20 },
+            { header: 'Top Detections', key: 'detections', width: 40 },
             { header: 'File Path', key: 'filePath', width: 50 }
         ];
-        allResults.forEach(r => worksheet.addRow(r));
-        worksheet.getRow(1).font = { bold: true };
-        worksheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0E0E0' } };
+
+        // Apply column headers to the specific row
+        const headerRow = worksheet.getRow(headerRowIndex);
+        headerRow.values = worksheet.columns.map(c => c.header);
+        headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+        headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF334155' } }; // Slate 700
+
+        // Add Data
+        allResults.forEach((r, idx) => {
+            const row = worksheet.addRow(r);
+            // Column F is the link
+            row.getCell(6).font = { color: { argb: 'FF3B82F6' }, underline: true };
+        });
+
+        // 3. Conditional Formatting (Flagged Count is Column C / Index 3)
+        if (allResults.length > 0) {
+            worksheet.addConditionalFormatting({
+                ref: `C${headerRowIndex + 1}:C${headerRowIndex + allResults.length}`,
+                rules: [
+                    {
+                        type: 'cellIs',
+                        operator: 'greaterThanOrEqual',
+                        formulae: [10],
+                        style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFCA5A5' } }, font: { color: { argb: 'FF991B1B' } } } // Red
+                    },
+                    {
+                        type: 'cellIs',
+                        operator: 'between',
+                        formulae: [1, 9],
+                        style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFED7AA' } }, font: { color: { argb: 'FF9A3412' } } } // Orange
+                    }
+                ]
+            });
+        }
 
         job.reportBuffer = await workbook.xlsx.writeBuffer();
         job.status = 'complete';
