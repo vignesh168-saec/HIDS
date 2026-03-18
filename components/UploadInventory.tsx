@@ -21,12 +21,15 @@ const VisuallyHiddenInput = styled('input')({
     width: 1,
 });
 
-const DropZone = styled(Paper)(({ theme }) => ({
+const DropZone = styled(Paper, {
+    shouldForwardProp: (prop) => prop !== 'isDragging'
+})<{ isDragging?: boolean }>(({ theme, isDragging }) => ({
     padding: theme.spacing(4),
     textAlign: 'center',
     cursor: 'pointer',
-    border: '2px dashed rgba(255, 255, 255, 0.1)',
-    backgroundColor: 'rgba(255, 255, 255, 0.02)',
+    border: '2px dashed',
+    borderColor: isDragging ? theme.palette.primary.main : 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: isDragging ? 'rgba(96, 165, 250, 0.08)' : 'rgba(255, 255, 255, 0.02)',
     transition: 'all 0.2s ease',
     '&:hover': {
         borderColor: theme.palette.primary.main,
@@ -45,6 +48,7 @@ interface ProgressState {
 export default function UploadInventory() {
     const [files, setFiles] = React.useState<File[]>([]);
     const [uploading, setUploading] = React.useState(false);
+    const [isDragging, setIsDragging] = React.useState(false);
     const [progress, setProgress] = React.useState<ProgressState | null>(null);
     const [eta, setEta] = React.useState<string | null>(null);
     const [startTime, setStartTime] = React.useState<number | null>(null);
@@ -146,13 +150,15 @@ export default function UploadInventory() {
                     <Stack spacing={3}>
                         {!uploading && !progress && (
                             <DropZone
+                                isDragging={isDragging}
                                 onClick={() => document.getElementById('inventory-upload')?.click()}
-                                onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                                onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                                onDragLeave={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                                onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setIsDragging(true); }}
+                                onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); setIsDragging(true); }}
+                                onDragLeave={(e) => { e.preventDefault(); e.stopPropagation(); setIsDragging(false); }}
                                 onDrop={(e) => {
                                     e.preventDefault();
                                     e.stopPropagation();
+                                    setIsDragging(false);
                                     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
                                         setFiles(Array.from(e.dataTransfer.files));
                                         setStatus(null);
