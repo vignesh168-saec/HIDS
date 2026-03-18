@@ -302,10 +302,19 @@ const runAnalysis = async (jobId, files) => {
         // Add Data
         finalResultsForExcel.forEach((r) => {
             const row = worksheet.addRow(r);
-            row.getCell(6).font = { color: { argb: 'FF3B82F6' }, underline: true };
+            
+            // Use the most compatible way to set a hyperlink using an Excel formula
+            const linkCell = row.getCell('vtLink');
+            linkCell.value = {
+                formula: `HYPERLINK("${r.vtLink.hyperlink}", "View on VirusTotal")`,
+                result: 'View on VirusTotal'
+            };
+            linkCell.font = { color: { argb: 'FF3B82F6' }, underline: true };
+
             // AI Recommendation styling — word wrap + italic
-            row.getCell(8).alignment = { wrapText: true, vertical: 'top' };
-            row.getCell(8).font = { italic: true, size: 10, color: { argb: 'FF64748B' } };
+            const aiCell = row.getCell('aiRecommendation');
+            aiCell.alignment = { wrapText: true, vertical: 'top' };
+            aiCell.font = { italic: true, size: 10, color: { argb: 'FF64748B' } };
         });
 
         // 3. Conditional Formatting (Flagged Count = Column C)
