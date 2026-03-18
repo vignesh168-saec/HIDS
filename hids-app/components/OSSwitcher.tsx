@@ -8,23 +8,7 @@ import WindowIcon from '@mui/icons-material/Window';
 import TerminalIcon from '@mui/icons-material/Terminal';
 import DownloadIcon from '@mui/icons-material/Download';
 import Link from 'next/link';
-import { ThemeProvider, createTheme, styled } from '@mui/material/styles';
-
-// Premium dark-themed MUI instance
-const theme = createTheme({
-    palette: {
-        mode: 'dark',
-        primary: {
-            main: '#60a5fa', // Bright blue
-        },
-        background: {
-            default: 'transparent',
-        },
-    },
-    typography: {
-        fontFamily: 'inherit',
-    },
-});
+import { styled } from '@mui/material/styles';
 
 const StyledTab = styled(Tab)(({ theme }) => ({
     textTransform: 'none',
@@ -85,8 +69,7 @@ export default function OSSwitcher() {
     };
 
     return (
-        <ThemeProvider theme={theme}>
-            <Box sx={{ width: '100%', mt: 4 }}>
+        <Box sx={{ width: '100%', mt: 4 }}>
                 <Box sx={{ borderBottom: 1, borderColor: 'rgba(255,255,255,0.1)', mb: 2 }}>
                     <Tabs
                         value={value}
@@ -198,13 +181,12 @@ export default function OSSwitcher() {
                                 </div>
                                 <div className="flex gap-4 items-start">
                                     <span className="flex-shrink-0 w-6 h-6 rounded-full bg-blue-500/20 text-blue-400 flex items-center justify-center text-xs font-bold">4</span>
-                                    <p className="text-sm text-neutral-300">Check generated CSV files in the current directory.</p>
+                                    <p className="text-sm text-neutral-300">Check generated <b>System_Inventory.csv</b> file in the current directory.</p>
                                 </div>
                             </div>
                         </div>
                     </div>
                 </CustomTabPanel>
             </Box>
-        </ThemeProvider>
     );
 }

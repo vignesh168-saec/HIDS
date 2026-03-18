@@ -1,5 +1,5 @@
-import Link from "next/link";
 import OSSwitcher from "@/components/OSSwitcher";
+import UploadInventory from "@/components/UploadInventory";
 
 export default function Home() {
   return (
@@ -13,6 +13,7 @@ export default function Home() {
 
       <section className="space-y-6">
         <OSSwitcher />
+        <UploadInventory />
 
         <div className="rounded-lg border border-black/10 dark:border-white/15 p-5">
           <h2 className="text-xl font-medium mb-3">What the script collects</h2>
