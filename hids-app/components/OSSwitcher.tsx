@@ -177,7 +177,7 @@ export default function OSSwitcher() {
                                 </div>
                                 <div className="flex gap-4 items-start">
                                     <span className="flex-shrink-0 w-6 h-6 rounded-full bg-blue-500/20 text-blue-400 flex items-center justify-center text-xs font-bold">3</span>
-                                    <p className="text-sm text-neutral-300">Run the script: <code className="bg-black/40 px-2 py-1 rounded text-blue-300 border border-white/5">./host-inventory.sh</code></p>
+                                    <p className="text-sm text-neutral-300">Run with <b>sudo</b> for full collection: <code className="bg-black/40 px-2 py-1 rounded text-blue-300 border border-white/5">sudo ./host-inventory.sh</code></p>
                                 </div>
                                 <div className="flex gap-4 items-start">
                                     <span className="flex-shrink-0 w-6 h-6 rounded-full bg-blue-500/20 text-blue-400 flex items-center justify-center text-xs font-bold">4</span>
