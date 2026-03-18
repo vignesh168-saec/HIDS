@@ -45,6 +45,8 @@ interface ProgressState {
     status: 'processing' | 'complete' | 'error';
 }
 
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL;
+
 export default function UploadInventory() {
     const [files, setFiles] = React.useState<File[]>([]);
     const [uploading, setUploading] = React.useState(false);
@@ -80,7 +82,7 @@ export default function UploadInventory() {
         files.forEach(file => formData.append('files', file));
 
         try {
-            const response = await fetch('http://localhost:2999/upload', {
+            const response = await fetch(`${API_BASE_URL}/upload`, {
                 method: 'POST',
                 body: formData,
             });
@@ -93,7 +95,7 @@ export default function UploadInventory() {
             const { jobId } = await response.json();
 
             // Connect to SSE for progress
-            const eventSource = new EventSource(`http://localhost:2999/jobs/${jobId}/progress`);
+            const eventSource = new EventSource(`${API_BASE_URL}/jobs/${jobId}/progress`);
 
             eventSource.onmessage = (event) => {
                 const data: ProgressState = JSON.parse(event.data);
@@ -112,7 +114,7 @@ export default function UploadInventory() {
                     eventSource.close();
                     setUploading(false);
                     setStatus({ type: 'success', message: 'Analysis complete! Downloading report...' });
-                    window.location.href = `http://localhost:2999/jobs/${jobId}/download`;
+                    window.location.href = `${API_BASE_URL}/jobs/${jobId}/download`;
                 }
 
                 if (data.status === 'error') {
