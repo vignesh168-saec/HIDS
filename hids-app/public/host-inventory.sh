@@ -107,8 +107,11 @@ for dir in "${directories[@]}"; do
             find "$dir" -maxdepth 3 -type f -name "$ext" 2>/dev/null | while read -r file; do
                 filename=$(basename "$file")
                 filetype=$(file -b "$file" | sed 's/"/""/g')
+                filetype=$(file -b "$file" | sed 's/"/""/g')
                 hash=$(sha256sum "$file" 2>/dev/null | awk '{print $1}')
-                append_to_csv "ConfigFile" "$filename" "$file" "Type:$filetype" "Found" "$hash"
+                # Capture content snippet (first 500 chars) for rule-based scanning
+                content_snippet=$(head -c 500 "$file" | tr -d '\n\r' | sed 's/"/""/g')
+                append_to_csv "ConfigFile" "$filename" "$file" "Type:$filetype; Content:[$content_snippet]" "Found" "$hash"
             done
         done
     fi
@@ -120,17 +123,21 @@ done
 echo "[4/5] Collecting Cron Job Inventory..."
 
 if [[ -f /etc/crontab ]]; then
-    grep -v '^#' /etc/crontab | awk '{print $7}' | while read -r cmd; do
-        if [[ -f "$cmd" ]]; then
-            filetype=$(file -b "$cmd" | sed 's/"/""/g')
-            hash=$(sha256sum "$cmd" 2>/dev/null | awk '{print $1}')
+    # Capture full command (column 7 onwards) and trim trailing whitespace
+    grep -v '^#' /etc/crontab | grep '/' | awk '{for(i=7;i<=NF;i++) printf "%s ", $i; print ""}' | sed 's/[[:space:]]*$//' | while read -r cmd; do
+        [[ -z "${cmd// }" ]] && continue
+        # Extract the binary name (first word) for the Name column
+        bin_name=$(echo "$cmd" | awk '{print $1}')
+        if [[ -f "$bin_name" ]]; then
+            filetype=$(file -b "$bin_name" | sed 's/"/""/g')
+            hash=$(sha256sum "$bin_name" 2>/dev/null | awk '{print $1}')
             status="OK"
         else
             filetype="Command/Script"
             hash="N/A"
             status="Found"
         fi
-        append_to_csv "CronJob" "$(basename "$cmd")" "$cmd" "Source:/etc/crontab; Type:$filetype" "$status" "$hash"
+        append_to_csv "CronJob" "$(basename "$bin_name")" "$cmd" "Source:/etc/crontab; Type:$filetype" "$status" "$hash"
     done
 fi
 
@@ -140,24 +147,29 @@ for dir in "${cron_dirs[@]}"; do
         find "$dir" -type f 2>/dev/null | while read -r file; do
             filetype=$(file -b "$file" | sed 's/"/""/g')
             hash=$(sha256sum "$file" 2>/dev/null | awk '{print $1}')
-            append_to_csv "CronJob" "$(basename "$file")" "$file" "Source:$dir; Type:$filetype" "OK" "$hash"
+            # Capture content snippet for rule-based scanning
+            content_snippet=$(head -c 500 "$file" | tr -d '\n\r' | sed 's/"/""/g')
+            append_to_csv "CronJob" "$(basename "$file")" "$file" "Source:$dir; Type:$filetype; Content:[$content_snippet]" "OK" "$hash"
         done
     fi
 done
 
 for user in $(cut -f1 -d: /etc/passwd); do
-    crontab -u "$user" -l 2>/dev/null | grep -v '^#' | awk '{print $6}' | while read -r cmd; do
-        [[ -z "$cmd" ]] && continue
-        if [[ -f "$cmd" ]]; then
-            filetype=$(file -b "$cmd" | sed 's/"/""/g')
-            hash=$(sha256sum "$cmd" 2>/dev/null | awk '{print $1}')
+    # Capture full command (column 6 onwards) while ignoring environment variables (containing =)
+    crontab -u "$user" -l 2>/dev/null | grep -v '^#' | grep -v '=' | awk '{for(i=6;i<=NF;i++) printf "%s ", $i; print ""}' | sed 's/[[:space:]]*$//' | while read -r cmd; do
+        [[ -z "${cmd// }" ]] && continue
+        # Extract the binary name (first word) for the Name column
+        bin_name=$(echo "$cmd" | awk '{print $1}')
+        if [[ -f "$bin_name" ]]; then
+            filetype=$(file -b "$bin_name" | sed 's/"/""/g')
+            hash=$(sha256sum "$bin_name" 2>/dev/null | awk '{print $1}')
             status="OK"
         else
             filetype="Command"
             hash="N/A"
             status="Found"
         fi
-        append_to_csv "CronJob" "$(basename "$cmd")" "$cmd" "User:$user; Type:$filetype" "$status" "$hash"
+        append_to_csv "CronJob" "$(basename "$bin_name")" "$cmd" "User:$user; Type:$filetype" "$status" "$hash"
     done
 done
 
@@ -165,15 +177,20 @@ done
 # 5. Download Artifact Inventory
 ################################################################################
 echo "[5/5] Collecting Download Artifact Inventory..."
-DOWNLOAD_DIR="$HOME/Downloads"
 
-if [[ -d "$DOWNLOAD_DIR" ]]; then
-    find "$DOWNLOAD_DIR" -maxdepth 2 -type f 2>/dev/null | while read -r file; do
-        filename=$(basename "$file")
-        filetype=$(file -b "$file" | sed 's/"/""/g')
-        hash=$(sha256sum "$file" 2>/dev/null | awk '{print $1}')
-        append_to_csv "DownloadsFile" "$filename" "$file" "Type:$filetype" "OK" "$hash"
-    done
-fi
+# Identify users with home directories in /home/ or root to scan their Downloads
+# Filter: UIDs >= 500 (common for users) or root, or any user with a home in /home/
+awk -F: '($3 == 0 || $3 >= 500 || $6 ~ /^\/home/) {print $1 ":" $6}' /etc/passwd | while IFS=: read -r user home; do
+    DOWNLOAD_DIR="$home/Downloads"
+    if [[ -d "$DOWNLOAD_DIR" ]]; then
+        echo "  - Scanning Downloads for user: $user ($DOWNLOAD_DIR)"
+        find "$DOWNLOAD_DIR" -maxdepth 2 -type f 2>/dev/null | while read -r file; do
+            filename=$(basename "$file")
+            filetype=$(file -b "$file" | sed 's/"/""/g')
+            hash=$(sha256sum "$file" 2>/dev/null | awk '{print $1}')
+            append_to_csv "DownloadsFile" "$filename" "$file" "Owner:$user; Type:$filetype" "OK" "$hash"
+        done
+    fi
+done
 
 echo "Inventory complete. Unified file generated: $OUTPUT_CSV"

@@ -50,6 +50,99 @@ app.get('/health', (req, res) => {
 // In-memory job store
 const activeJobs = new Map();
 
+// Configuration for Dual-Track Analysis
+const HASH_CATEGORIES = ['Process', 'Service', 'DownloadsFile'];
+const RULE_CATEGORIES = ['ConfigFile', 'CronJob'];
+
+// Rule-Based Security Patterns for non-hashable items
+const SECURITY_RULES = [
+    // -- Cron Job Rules --
+    {
+        id: 'CRON_REVERSE_SHELL',
+        category: 'CronJob',
+        severity: 'Critical',
+        regex: /nc\s+-e|bash\s+-i|\/dev\/tcp\/|mkfifo|ncat|netcat/i,
+        description: 'Potential reverse shell command detected in cron entry.'
+    },
+    {
+        id: 'CRON_HIDDEN_PATH',
+        category: 'CronJob',
+        severity: 'High',
+        regex: /\/\.[\w.-]+|\/tmp\/|\/dev\/shm\/|\/var\/tmp\//i,
+        description: 'Execution from hidden file or temporary directory.'
+    },
+    {
+        id: 'CRON_CURL_WGET_PIPE',
+        category: 'CronJob',
+        severity: 'High',
+        regex: /(curl|wget).+?\|\s*(bash|sh|zsh|python|perl|php)/i,
+        description: 'Suspicious remote script execution (download and pipe to shell).'
+    },
+    {
+        id: 'CRON_BASE64_EXEC',
+        category: 'CronJob',
+        severity: 'High',
+        regex: /base64\s+-d|echo\s+.+?\|\s*base64/i,
+        description: 'Obfuscated payload execution using Base64 encoding.'
+    },
+    {
+        id: 'CRON_FREQUENT_SCHEDULE',
+        category: 'CronJob',
+        severity: 'Medium',
+        regex: /\*\/\d\s+\*\s+\*\s+\*\s+\*/, // Catch */1, */2, etc. (every N mins)
+        description: 'Extremely frequent execution schedule (runs every few minutes).'
+    },
+    
+    // -- Config File Rules --
+    {
+        id: 'CFG_WORLD_WRITABLE',
+        category: 'ConfigFile',
+        severity: 'High',
+        regex: /(?<!not\s)writable|777|666/i,
+        description: 'Potential world-writable file permissions detected in metadata (ignoring "not writable" comments).'
+    },
+    {
+        id: 'CFG_HIDDEN_IN_OPT',
+        category: 'ConfigFile',
+        severity: 'Medium',
+        regex: /\/opt\/\.[\w.-]+/i,
+        description: 'Config file located in a hidden directory within /opt.'
+    },
+    {
+        id: 'CFG_SUSPICIOUS_INCLUDE',
+        category: 'ConfigFile',
+        severity: 'Medium',
+        regex: /include\s+(\/tmp\/|\/dev\/shm\/)/i,
+        description: 'Configuration inclusion from a temporary or shared memory directory.'
+    }
+];
+
+const analyzeWithRules = (record) => {
+    const matchedRules = [];
+    const searchString = `${record.Name} ${record.Path} ${record.Additional}`.toLowerCase();
+    
+    SECURITY_RULES.forEach(rule => {
+        if (rule.category === record.Category && rule.regex.test(searchString)) {
+            matchedRules.push(rule);
+        }
+    });
+
+    if (matchedRules.length === 0) return null;
+
+    // Determine highest severity
+    const severities = { 'Critical': 4, 'High': 3, 'Medium': 2, 'Low': 1 };
+    const highestRule = matchedRules.reduce((prev, curr) => 
+        (severities[curr.severity] > severities[prev.severity]) ? curr : prev
+    );
+
+    return {
+        matchedRules: matchedRules.map(r => r.id).join(', '),
+        descriptions: matchedRules.map(r => r.description).join('; '),
+        riskLevel: highestRule.severity,
+        summary: highestRule.description // For LLM prompt
+    };
+};
+
 // Configure multer for memory storage with limits
 const upload = multer({ 
     storage: multer.memoryStorage(),
@@ -126,7 +219,7 @@ const getVTAnalysis = (hash) => {
 const getLLMRecommendation = async (fileInfo) => {
     if (!groqClient) return 'AI recommendations unavailable (API key not configured).';
 
-    const prompt = `You are a cybersecurity analyst. Given the following VirusTotal detection result, provide a concise remediation recommendation in under 100 words.
+    const prompt = `You are a cybersecurity analyst. Given the following security analysis detections, provide a concise remediation recommendation in under 100 words.
 
 File: ${fileInfo.filename}
 Path: ${fileInfo.filePath}
@@ -136,11 +229,12 @@ Suspicious Detections: ${fileInfo.suspicious}
 Top Detection Names: ${fileInfo.detections}
 
 Rules:
-- Use cautious language ("may indicate", "suggests", not "this IS malware")
-- Provide 1-2 specific actionable steps
-- Mention if the filename mimics a known legitimate program
-- Do NOT present uncertain analysis as confirmed fact
-- Keep the tone professional and helpful`;
+- Do NOT mention "VirusTotal", "VT", or any specific scanning service name.
+- Use cautious language ("may indicate", "suggests", not "this IS malware").
+- Provide 1-2 specific actionable steps.
+- Mention if the filename mimics a known legitimate program.
+- Do NOT present uncertain analysis as confirmed fact.
+- Keep the tone professional and helpful.`;
 
     try {
         const response = await groqClient.chat.completions.create({
@@ -171,49 +265,88 @@ const runAnalysis = async (jobId, files) => {
         for (const file of files) {
             console.log(`📄 Reading file: ${file.originalname}`);
             const content = file.buffer.toString();
-            const records = parse(content, { columns: true, skip_empty_lines: true });
+            
+            // Detect delimiter (comma or tab)
+            const firstLine = content.split('\n')[0];
+            const delimiter = firstLine.includes('\t') ? '\t' : ',';
+            console.log(`📡 Auto-detected delimiter: ${delimiter === '\t' ? 'TAB' : 'COMMA'}`);
+
+            const records = parse(content, { 
+                columns: true, 
+                skip_empty_lines: true,
+                delimiter: delimiter,
+                trim: true
+            });
+
+            console.log(`📝 Parsed ${records.length} records from ${file.originalname}`);
+            if (records.length > 0) {
+                console.log(`🔍 Example Category: "${records[0].Category}"`);
+            }
             allRecords.push(...records);
         }
 
-        // Step 2: Identify unique valid SHA-256 hashes
+        // Step 2: Classify records for Dual-Track Analysis
+        const hashableRecords = allRecords.filter(r => HASH_CATEGORIES.includes(r.Category));
+        const ruleBasedRecords = allRecords.filter(r => RULE_CATEGORIES.includes(r.Category));
+
+        // Identify unique valid SHA-256 hashes for Track 1
         const uniqueHashes = new Set();
-        allRecords.forEach(record => {
+        hashableRecords.forEach(record => {
             const hash = record.Hash;
             if (hash && hash.length === 64 && /^[a-fA-F0-9]+$/.test(hash)) {
                 uniqueHashes.add(hash);
             }
         });
 
-        // Update job total to be the number of UNIQUE hashes (this is what we actually check)
-        job.total = uniqueHashes.size;
-        console.log(`🗜️ Deduplication complete: ${allRecords.length} rows reduced to ${uniqueHashes.size} unique hashes.`);
+        // Update job total to be (unique hashes + count of rule-based items)
+        job.total = uniqueHashes.size + ruleBasedRecords.length;
+        console.log(`🗜️ Dual-Track Split: ${uniqueHashes.size} unique hashes + ${ruleBasedRecords.length} config/cron items.`);
 
-        // Step 3: Analyze each UNIQUE hash
+        // --- TRACK 1: Hash-Based Analysis (VirusTotal) ---
         const resultsMap = new Map();
         for (const hash of uniqueHashes) {
-            const representativeRecord = allRecords.find(r => r.Hash === hash);
+            // Fix: Only look for representative records in HASHABLE categories
+            const representativeRecord = hashableRecords.find(r => r.Hash === hash);
             job.currentFile = representativeRecord ? representativeRecord.Name : 'System File';
             
-            console.log(`🔬 Analyzing unique hash: ${hash.substring(0, 8)}... (${job.currentFile})`);
+            console.log(`🔬 [Track 1] Analyzing unique hash: ${hash.substring(0, 8)}... (${job.currentFile})`);
             const analysis = await getVTAnalysis(hash);
             resultsMap.set(hash, analysis);
             job.processed++;
 
             if (analysis.flaggedCount > 0) {
                 job.flaggedCount++;
-                console.log(`🚩 FLAGGED: ${job.currentFile} (${analysis.flaggedCount} matches)`);
+                console.log(`🚩 FLAGGED (VT): ${job.currentFile} (${analysis.flaggedCount} matches)`);
             }
         }
 
-        // Step 3.5: Generate AI recommendations for FLAGGED unique hashes
-        const aiRecommendations = new Map();
-        const flaggedHashes = Array.from(resultsMap.entries()).filter(([, a]) => a.flaggedCount > 0);
+        // --- TRACK 2: Rule-Based Analysis (Pattern Matching) ---
+        const ruleFindingsMap = new Map();
+        for (let i = 0; i < ruleBasedRecords.length; i++) {
+            const record = ruleBasedRecords[i];
+            job.currentFile = record.Name || record.Path || 'Unnamed Config/Cron';
+            console.log(`🔎 [Track 2] Rule-checking item ${i+1}/${ruleBasedRecords.length}: ${job.currentFile}`);
+            
+            const findings = analyzeWithRules(record);
+            if (findings) {
+                ruleFindingsMap.set(i, findings);
+                job.flaggedCount++;
+                console.log(`🚩 FLAGGED (Rules): ${job.currentFile} [${findings.matchedRules}]`);
+            }
+            job.processed++;
+        }
 
-        if (flaggedHashes.length > 0 && groqClient) {
-            console.log(`🤖 Generating AI recommendations for ${flaggedHashes.length} flagged file(s)...`);
+        // Step 3.5: Generate AI recommendations for FLAGGED items (Both Tracks)
+        const aiRecommendations = new Map();
+        const flaggedVTHashes = Array.from(resultsMap.entries()).filter(([, a]) => a.flaggedCount > 0);
+        const flaggedRuleIndices = Array.from(ruleFindingsMap.keys());
+
+        if ((flaggedVTHashes.length > 0 || flaggedRuleIndices.length > 0) && groqClient) {
+            console.log(`🤖 Generating AI recommendations for ${flaggedVTHashes.length + flaggedRuleIndices.length} flagged item(s)...`);
             job.currentFile = 'Generating AI insights...';
 
-            for (const [hash, analysis] of flaggedHashes) {
+            // Recommendations for Track 1
+            for (const [hash, analysis] of flaggedVTHashes) {
                 const record = allRecords.find(r => r.Hash === hash);
                 const recommendation = await getLLMRecommendation({
                     filename: record?.Name || 'Unknown',
@@ -223,23 +356,34 @@ const runAnalysis = async (jobId, files) => {
                     suspicious: analysis.suspicious,
                     detections: analysis.detections
                 });
-                aiRecommendations.set(hash, recommendation);
+                aiRecommendations.set(`hash_${hash}`, recommendation);
             }
-            console.log(`✅ AI recommendations complete for ${aiRecommendations.size} entries.`);
-        } else if (flaggedHashes.length > 0) {
-            console.log('⏭️ Skipping AI recommendations (Groq API key not configured).');
+
+            // Recommendations for Track 2
+            for (const idx of flaggedRuleIndices) {
+                const record = ruleBasedRecords[idx];
+                const findings = ruleFindingsMap.get(idx);
+                const recommendation = await getLLMRecommendation({
+                    filename: record.Name,
+                    filePath: record.Path,
+                    category: record.Category,
+                    malicious: 0,
+                    suspicious: 1, // Treat rule flag as suspicious
+                    detections: findings.matchedRules
+                });
+                aiRecommendations.set(`rule_${idx}`, recommendation);
+            }
+            console.log(`✅ AI recommendations complete.`);
         }
 
         // Step 4: Map results back to ORIGINAL records for the final report
-        const finalResultsForExcel = [];
-        console.log(`📊 Reconstructing full report from ${allRecords.length} inventory items...`);
-
-        for (const record of allRecords) {
+        const finalHashResults = [];
+        for (const record of hashableRecords) {
             const hash = record.Hash;
             const analysis = resultsMap.get(hash);
 
             if (analysis && analysis.flaggedCount > 0) {
-                finalResultsForExcel.push({
+                finalHashResults.push({
                     category: record.Category || 'Unknown',
                     filename: record.Name,
                     flaggedCount: analysis.flaggedCount,
@@ -247,41 +391,54 @@ const runAnalysis = async (jobId, files) => {
                     suspicious: analysis.suspicious,
                     vtLink: { text: 'View on VirusTotal', hyperlink: `https://www.virustotal.com/gui/file/${hash}` },
                     detections: analysis.detections,
-                    aiRecommendation: aiRecommendations.get(hash) || 'N/A',
+                    aiRecommendation: aiRecommendations.get(`hash_${hash}`) || 'N/A',
                     filePath: record.Path
                 });
             }
         }
 
-        console.log(`📊 Generating Excel report with ${finalResultsForExcel.length} total flagged entries...`);
-        // Generate Enriched Excel
+        const finalRuleResults = [];
+        for (let i = 0; i < ruleBasedRecords.length; i++) {
+            const record = ruleBasedRecords[i];
+            const findings = ruleFindingsMap.get(i);
+            if (findings) {
+                finalRuleResults.push({
+                    category: record.Category,
+                    name: record.Name,
+                    path: record.Path,
+                    matchedRules: findings.matchedRules,
+                    riskLevel: findings.riskLevel,
+                    aiRecommendation: aiRecommendations.get(`rule_${i}`) || 'N/A',
+                    additional: record.Additional
+                });
+            }
+        }
+
+
+        console.log(`📊 Generating multi-sheet Excel report (${finalHashResults.length} VT results, ${finalRuleResults.length} rule results)...`);
         const workbook = new ExcelJS.Workbook();
-        const worksheet = workbook.addWorksheet('Security Analysis');
 
-        // 1. Summary Header
-        worksheet.mergeCells('A1:I1');
-        const titleCell = worksheet.getCell('A1');
-        titleCell.value = 'HOST INVENTORY SECURITY ANALYSIS SUMMARY';
-        titleCell.font = { bold: true, size: 14, color: { argb: 'FFFFFFFF' } };
-        titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } };
-        titleCell.alignment = { horizontal: 'center' };
+        // --- SHEET 1: Security Analysis (Hash-Based) ---
+        const vtSheet = workbook.addWorksheet('Security Analysis');
+        vtSheet.mergeCells('A1:I1');
+        const vtTitle = vtSheet.getCell('A1');
+        vtTitle.value = 'HOST INVENTORY SECURITY ANALYSIS (HASH-BASED)';
+        vtTitle.font = { bold: true, size: 14, color: { argb: 'FFFFFFFF' } };
+        vtTitle.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } };
+        vtTitle.alignment = { horizontal: 'center' };
 
-        worksheet.getRow(2).values = ['Total Unique Hashes', 'Total Unique Flagged', 'Malicious Found', 'Suspicious Found'];
-        worksheet.getRow(2).font = { bold: true };
-        
+        vtSheet.getRow(2).values = ['Total Unique Hashes', 'Total Unique Flagged', 'Malicious Found', 'Suspicious Found', 'Rules Flagged (Sheet 2)'];
+        vtSheet.getRow(2).font = { bold: true };
         const totalMalicious = Array.from(resultsMap.values()).reduce((sum, r) => sum + r.malicious, 0);
         const totalSuspicious = Array.from(resultsMap.values()).reduce((sum, r) => sum + r.suspicious, 0);
-        worksheet.getRow(3).values = [job.total, job.flaggedCount, totalMalicious, totalSuspicious];
+        vtSheet.getRow(3).values = [uniqueHashes.size, flaggedVTHashes.length, totalMalicious, totalSuspicious, finalRuleResults.length];
 
-        // AI Disclaimer row
-        worksheet.mergeCells('A4:I4');
-        const disclaimerCell = worksheet.getCell('A4');
-        disclaimerCell.value = '⚠️ AI recommendations are guidance only — not a substitute for professional malware analysis.';
-        disclaimerCell.font = { italic: true, size: 9, color: { argb: 'FF94A3B8' } };
+        vtSheet.mergeCells('A4:I4');
+        const vtDisclaimer = vtSheet.getCell('A4');
+        vtDisclaimer.value = '⚠️ AI recommendations are guidance only — not a substitute for professional malware analysis.';
+        vtDisclaimer.font = { italic: true, size: 9, color: { argb: 'FF94A3B8' } };
 
-        // 2. Data Table
-        const headerRowIndex = 6;
-        worksheet.columns = [
+        vtSheet.columns = [
             { header: 'Category', key: 'category', width: 15 },
             { header: 'Filename', key: 'filename', width: 25 },
             { header: 'Flagged Count', key: 'flaggedCount', width: 15 },
@@ -293,54 +450,78 @@ const runAnalysis = async (jobId, files) => {
             { header: 'File Path', key: 'filePath', width: 50 }
         ];
 
-        // Apply column headers to the specific row
-        const headerRow = worksheet.getRow(headerRowIndex);
-        headerRow.values = worksheet.columns.map(c => c.header);
-        headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-        headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF334155' } };
+        const vtHeaderRow = vtSheet.getRow(6);
+        vtHeaderRow.values = vtSheet.columns.map(c => c.header);
+        vtHeaderRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+        vtHeaderRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF334155' } };
 
-        // Add Data
-        finalResultsForExcel.forEach((r) => {
-            const row = worksheet.addRow(r);
-            
-            // Use the most compatible way to set a hyperlink using an Excel formula
+        finalHashResults.forEach((r) => {
+            const row = vtSheet.addRow(r);
             const linkCell = row.getCell('vtLink');
             linkCell.value = {
                 formula: `HYPERLINK("${r.vtLink.hyperlink}", "View on VirusTotal")`,
                 result: 'View on VirusTotal'
             };
             linkCell.font = { color: { argb: 'FF3B82F6' }, underline: true };
-
-            // AI Recommendation styling — word wrap + italic
             const aiCell = row.getCell('aiRecommendation');
             aiCell.alignment = { wrapText: true, vertical: 'top' };
             aiCell.font = { italic: true, size: 10, color: { argb: 'FF64748B' } };
         });
 
-        // 3. Conditional Formatting (Flagged Count = Column C)
-        if (finalResultsForExcel.length > 0) {
-            worksheet.addConditionalFormatting({
-                ref: `C${headerRowIndex + 1}:C${headerRowIndex + finalResultsForExcel.length}`,
+        if (finalHashResults.length > 0) {
+            vtSheet.addConditionalFormatting({
+                ref: `C7:C${6 + finalHashResults.length}`,
                 rules: [
-                    {
-                        type: 'cellIs',
-                        operator: 'greaterThanOrEqual',
-                        formulae: [10],
-                        style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFCA5A5' } }, font: { color: { argb: 'FF991B1B' } } }
-                    },
-                    {
-                        type: 'cellIs',
-                        operator: 'between',
-                        formulae: [1, 9],
-                        style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFED7AA' } }, font: { color: { argb: 'FF9A3412' } } }
-                    }
+                    { type: 'cellIs', operator: 'greaterThanOrEqual', formulae: [10], style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFCA5A5' } }, font: { color: { argb: 'FF991B1B' } } } },
+                    { type: 'cellIs', operator: 'between', formulae: [1, 9], style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFED7AA' } }, font: { color: { argb: 'FF9A3412' } } } }
                 ]
             });
         }
 
+        // --- SHEET 2: Config & Cron Analysis (Rule-Based) ---
+        const ruleSheet = workbook.addWorksheet('Config & Cron Analysis');
+        ruleSheet.mergeCells('A1:G1');
+        const ruleTitle = ruleSheet.getCell('A1');
+        ruleTitle.value = 'HOST INVENTORY CONFIG & CRON ANALYSIS (RULE-BASED)';
+        ruleTitle.font = { bold: true, size: 14, color: { argb: 'FFFFFFFF' } };
+        ruleTitle.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4338CA' } }; // Indigo 700
+        ruleTitle.alignment = { horizontal: 'center' };
+
+        ruleSheet.getRow(2).values = ['Total Rules Checked', 'Total Items Scanned', 'Rules Flagged'];
+        ruleSheet.getRow(2).font = { bold: true };
+        ruleSheet.getRow(3).values = [SECURITY_RULES.length, ruleBasedRecords.length, finalRuleResults.length];
+
+        ruleSheet.columns = [
+            { header: 'Category', key: 'category', width: 15 },
+            { header: 'Name', key: 'name', width: 25 },
+            { header: 'Risk Level', key: 'riskLevel', width: 12 },
+            { header: 'Matched Rules', key: 'matchedRules', width: 30 },
+            { header: 'AI Recommendation', key: 'aiRecommendation', width: 60 },
+            { header: 'Path', key: 'path', width: 40 },
+            { header: 'Additional Info', key: 'additional', width: 40 }
+        ];
+
+        const ruleHeaderRow = ruleSheet.getRow(5);
+        ruleHeaderRow.values = ruleSheet.columns.map(c => c.header);
+        ruleHeaderRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+        ruleHeaderRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4F46E5' } };
+
+        finalRuleResults.forEach((r) => {
+            const row = ruleSheet.addRow(r);
+            // Risk Level Coloring
+            const riskCell = row.getCell('riskLevel');
+            if (r.riskLevel === 'Critical') riskCell.font = { color: { argb: 'FFB91C1C' }, bold: true };
+            if (r.riskLevel === 'High') riskCell.font = { color: { argb: 'FFEA580C' }, bold: true };
+            
+            const aiCell = row.getCell('aiRecommendation');
+            aiCell.alignment = { wrapText: true, vertical: 'top' };
+            aiCell.font = { italic: true, size: 10, color: { argb: 'FF64748B' } };
+        });
+
         job.reportBuffer = await workbook.xlsx.writeBuffer();
         job.status = 'complete';
-        console.log(`✨ Job ${jobId} finalized. Deduplication saved ${allRecords.length - job.total} API calls!`);
+        console.log(`✨ Job ${jobId} finalized. Dual-track analysis complete.`);
+
     } catch (error) {
         console.error(`❌ Job ${jobId} failed:`, error);
         job.status = 'error';
