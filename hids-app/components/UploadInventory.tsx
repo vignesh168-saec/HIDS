@@ -130,9 +130,10 @@ export default function UploadInventory() {
                 setStatus({ type: 'error', message: 'Connection to analysis server lost.' });
             };
 
-        } catch (error: any) {
+        } catch (error) {
             setUploading(false);
-            setStatus({ type: 'error', message: error.message || 'Error connecting to the analysis server.' });
+            const errorMessage = error instanceof Error ? error.message : 'Error connecting to the analysis server.';
+            setStatus({ type: 'error', message: errorMessage });
         }
     };
 
