@@ -1,4 +1,5 @@
 const express = require('express');
+console.log('🚀 Backend server starting...');
 const cors = require('cors');
 const multer = require('multer');
 const { parse } = require('csv-parse/sync');
@@ -17,8 +18,14 @@ app.use(express.json());
 // In-memory job store
 const activeJobs = new Map();
 
-// Configure multer for memory storage
-const upload = multer({ storage: multer.memoryStorage() });
+// Configure multer for memory storage with limits
+const upload = multer({ 
+    storage: multer.memoryStorage(),
+    limits: {
+        fileSize: 10 * 1024 * 1024, // 10MB
+        files: 1
+    }
+});
 
 // Queue for VirusTotal requests to respect rate limits
 const vtRequestQueue = [];
@@ -189,33 +196,49 @@ const runAnalysis = async (jobId, files) => {
     }
 };
 
-app.post('/upload', upload.array('files'), async (req, res) => {
-    try {
-        if (!req.files || req.files.length === 0) return res.status(400).send('No files uploaded.');
-
-        let totalHashes = 0;
-        for (const file of req.files) {
-            const records = parse(file.buffer.toString(), { columns: true, skip_empty_lines: true });
-            totalHashes += records.filter(r => r.Hash && r.Hash.length === 64).length;
+app.post('/upload', (req, res) => {
+    upload.array('files', 5)(req, res, (err) => {
+        if (err instanceof multer.MulterError) {
+            if (err.code === 'LIMIT_FILE_SIZE') {
+                return res.status(413).send('File too large. Maximum size is 10MB per file.');
+            }
+            if (err.code === 'LIMIT_FILE_COUNT') {
+                return res.status(413).send('Too many files. Maximum is 5.');
+            }
+            return res.status(400).send(err.message);
+        } else if (err) {
+            return res.status(500).send('Error during file upload.');
         }
 
-        const jobId = crypto.randomUUID();
-        activeJobs.set(jobId, {
-            id: jobId,
-            total: totalHashes,
-            processed: 0,
-            flaggedCount: 0,
-            currentFile: '',
-            status: 'processing',
-            reportBuffer: null
-        });
+        if (!req.files || req.files.length === 0) {
+            return res.status(400).send('No files uploaded.');
+        }
 
-        runAnalysis(jobId, req.files); // Run in background
+        try {
+            let totalHashes = 0;
+            for (const file of req.files) {
+                const records = parse(file.buffer.toString(), { columns: true, skip_empty_lines: true });
+                totalHashes += records.filter(r => r.Hash && r.Hash.length === 64).length;
+            }
 
-        res.json({ jobId });
-    } catch (error) {
-        res.status(500).send('Error initializing upload.');
-    }
+            const jobId = crypto.randomUUID();
+            activeJobs.set(jobId, {
+                id: jobId,
+                total: totalHashes,
+                processed: 0,
+                flaggedCount: 0,
+                currentFile: '',
+                status: 'processing',
+                reportBuffer: null
+            });
+
+            runAnalysis(jobId, req.files); // Run in background
+
+            res.json({ jobId });
+        } catch (error) {
+            res.status(500).send('Error initializing upload.');
+        }
+    });
 });
 
 app.get('/jobs/:id/progress', (req, res) => {
