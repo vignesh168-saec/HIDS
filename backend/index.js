@@ -219,7 +219,7 @@ const getVTAnalysis = (hash) => {
 const getLLMRecommendation = async (fileInfo) => {
     if (!groqClient) return 'AI recommendations unavailable (API key not configured).';
 
-    const prompt = `You are a cybersecurity analyst. Given the following VirusTotal detection result, provide a concise remediation recommendation in under 100 words.
+    const prompt = `You are a cybersecurity analyst. Given the following security analysis detections, provide a concise remediation recommendation in under 100 words.
 
 File: ${fileInfo.filename}
 Path: ${fileInfo.filePath}
@@ -229,11 +229,12 @@ Suspicious Detections: ${fileInfo.suspicious}
 Top Detection Names: ${fileInfo.detections}
 
 Rules:
-- Use cautious language ("may indicate", "suggests", not "this IS malware")
-- Provide 1-2 specific actionable steps
-- Mention if the filename mimics a known legitimate program
-- Do NOT present uncertain analysis as confirmed fact
-- Keep the tone professional and helpful`;
+- Do NOT mention "VirusTotal", "VT", or any specific scanning service name.
+- Use cautious language ("may indicate", "suggests", not "this IS malware").
+- Provide 1-2 specific actionable steps.
+- Mention if the filename mimics a known legitimate program.
+- Do NOT present uncertain analysis as confirmed fact.
+- Keep the tone professional and helpful.`;
 
     try {
         const response = await groqClient.chat.completions.create({
