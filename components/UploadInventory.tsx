@@ -169,13 +169,12 @@ export default function UploadInventory() {
                                 <VisuallyHiddenInput
                                     id="inventory-upload"
                                     type="file"
-                                    multiple
                                     accept=".csv"
                                     onChange={handleFileChange}
                                 />
                                 <CloudUploadIcon sx={{ fontSize: 40, color: 'rgba(255,255,255,0.3)', mb: 2 }} />
                                 <Typography variant="h6" fontWeight={500}>
-                                    Select CSV Inventory Files
+                                    Select CSV Inventory File
                                 </Typography>
                                 <Typography variant="body2" sx={{ color: 'rgba(255,255,255,0.4)' }}>
                                     Drag and drop or click to browse
@@ -187,7 +186,7 @@ export default function UploadInventory() {
                             <Box>
                                 <Typography variant="subtitle2" sx={{ mb: 1.5, display: 'flex', alignItems: 'center', gap: 1 }}>
                                     <FilePresentIcon sx={{ fontSize: 18 }} />
-                                    Selected Files ({files.length}):
+                                    Selected File:
                                 </Typography>
                                 <Stack spacing={1}>
                                     {files.map((file, idx) => (
